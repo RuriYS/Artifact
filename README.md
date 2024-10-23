@@ -12,8 +12,12 @@ from their original locations while preserving their names. It's useful for:
 
 ## Usage
 
-   ./artifact.sh [src] [artifacts]
-   ./artifact.sh clear              Remove artifacts directory
+```sh
+   artifact.sh [src] [artifacts]
+
+   artifact.sh help               Shows help obviously
+   artifact.sh clear              Remove artifacts directory
+```
 
 ## Parameters
 
