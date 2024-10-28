@@ -13,10 +13,10 @@ from their original locations while preserving their names. It's useful for:
 ## Usage
 
 ```sh
-   artifact.sh [src] [artifacts]
+artifact.sh [src] [artifacts]
 
-   artifact.sh help               Shows help obviously
-   artifact.sh clear              Remove artifacts directory
+artifact.sh help               Shows help obviously
+artifact.sh clear              Remove artifacts directory
 ```
 
 ## Parameters
@@ -37,9 +37,9 @@ Each line can be either:
 2. A specific path relative to source directory: `docs/README.md`
 
 ```sh
- script.js                         Will only look for script.js
- docs/README.md                    Will only look in docs directory
- src/lib/utils.js                  Will only look in src/lib directory
+script.js                         Will only look for script.js
+docs/README.md                    Will only look in docs directory
+src/lib/utils.js                  Will only look in src/lib directory
 ```
 
 ## Examples
