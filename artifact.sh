@@ -1,54 +1,97 @@
 #!/bin/bash
 
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+NC='\033[0m' # No Color
+
+print_info() { echo -e "${GREEN}$1${NC}"; }
+print_warning() { echo -e "${YELLOW}$1${NC}"; }
+print_error() { echo -e "${RED}$1${NC}"; }
+
+# Usage message - replace the current usage() function
 usage() {
-    echo "artifact.sh - File artifacting utility"
+    echo -e "${YELLOW}"
+    echo "Usage: $0 [src] [config]"
+    echo "  src               Source directory (default: current directory)"
+    echo "  config            Artifact config  (default: .artifacts)"
     echo
-    echo "Description:"
-    echo "  Creates a collection of files by copying them from their source"
-    echo "  locations into a single flat directory structure."
-    echo
-    echo "Usage: $0 [src] [artifacts]"
-    echo "  src:        Optional. Directory to search for files (default: current directory)"
-    echo "  artifacts:  Optional. File containing list of files to copy (default: .artifacts)"
-    echo
-    echo "Special Commands:"
-    echo "  $0 clear    Remove the artifacts directory"
-    echo
-    echo "Examples:"
-    echo "  $0                      # Use current directory and default .artifacts file"
-    echo "  $0 /path/to/project     # Search in specific directory"
-    echo "  $0 . custom-artifacts   # Use custom artifacts list file"
-    echo "  $0 clear                # Remove artifacts directory"
-    echo
+    echo "Commands:"
+    echo "  $0 clear      Remove artifacts directory"
+    echo -e "${NC}"
     exit 1
 }
 
-# Clear artifacts function
+# Replace clear_artifacts() with simpler version
 clear_artifacts() {
-    local output_dir="artifacts"
-    if [ ! -d "$output_dir" ]; then
-        echo "No artifacts directory found."
+    if [ ! -d "artifacts" ]; then
+        print_error "No artifacts directory found."
         exit 0
     fi
-
-    # Count files in artifacts directory
-    local file_count=$(find "$output_dir" -type f | wc -l)
-
-    echo "This will remove the artifacts directory containing $file_count files."
-    read -p "Are you sure you want to continue? [y/N] " -n 1 -r
-    echo
-    if [[ $REPLY =~ ^[Yy]$ ]]; then
-        rm -rf "$output_dir"
-        echo "Artifacts directory removed."
-    else
-        echo "Operation cancelled."
-    fi
+    rm -rf "artifacts"
+    print_info "Artifacts directory removed."
     exit 0
+}
+
+# Initialize metadata JSON
+init_metadata() {
+    echo '{
+  "created_at": "'"$(date -u +"%Y-%m-%dT%H:%M:%SZ")"'",
+  "source_directory": "'"$(realpath "$source_dir")"'",
+  "artifacts": []
+}' >"$output_dir/metadata.json"
+}
+
+# Get file size in bytes
+get_file_size() {
+    local file="$1"
+    if [ -f "$file" ]; then
+        du -b "$file" | cut -f1
+    else
+        echo "0"
+    fi
+}
+
+get_file_type() {
+    local file="$1"
+    local ext="${file##*.}"
+    case "$ext" in
+    js) echo "text/javascript" ;;
+    css) echo "text/css" ;;
+    html) echo "text/html" ;;
+    json) echo "application/json" ;;
+    md) echo "text/markdown" ;;
+    txt) echo "text/plain" ;;
+    *) file --mime-type -b "$file" 2>/dev/null || echo "application/octet-stream" ;;
+    esac
+}
+
+# Add entry to metadata JSON
+# Parameters: configname original_path file_size file_type
+add_to_metadata() {
+    local filename="$1"
+    local path="$2"
+    local size="$3"
+    local type="$4"
+
+    jq --arg f "$filename" \
+        --arg p "$(realpath "$path")" \
+        --arg s "$size" \
+        --arg t "$type" \
+        '.artifacts += [{
+           "filename": $f,
+           "original_path": $p,
+           "size_bytes": $s | tonumber,
+           "type": $t
+       }]' "$output_dir/metadata.json" >"$output_dir/metadata_temp.json"
+
+    mv "$output_dir/metadata_temp.json" "$output_dir/metadata.json"
 }
 
 # Parse arguments
 source_dir="."
-artifacts_file=".artifacts"
+config=".artifacts"
 
 # Handle special commands first
 if [ "$1" = "help" ]; then
@@ -58,97 +101,77 @@ elif [ "$1" = "clear" ]; then
 fi
 
 case $# in
-    0) ;;
-    1) source_dir="$1" ;;
-    2) source_dir="$1"; artifacts_file="$2" ;;
-    *) usage ;;
+0) ;;
+1) source_dir="$1" ;;
+2)
+    source_dir="$1"
+    config="$2"
+    ;;
+*) usage ;;
 esac
 
-if [ ! -f "$artifacts_file" ]; then
-    echo "$artifacts_file does not exist, creating it..."
-    echo "Check the created $artifacts_file file for usage instructions"
+# Check if jq is installed
+if ! command -v jq &>/dev/null; then
+    print_error "This script requires 'jq' for JSON processing."
+    print_info "Please install jq using your package manager."
+    print_info "For example: 'sudo apt install jq' or 'brew install jq'"
+    exit 1
+fi
+
+# Check if config exists
+if [ ! -f "$config" ]; then
+    print_info "$config does not exist, creating it..."
     {
-        echo "# Artifacts Configuration File"
-        echo "# ---------------------------"
-        echo "# Each line can be either:"
-        echo "#   1. A specific path relative to source directory"
-        echo "#   2. Just a filename to search for recursively"
-        echo "#"
-        echo "# Examples with specific paths (relative to source):"
-        echo "# docs/README.md              # Only looks in docs directory"
-        echo "# src/lib/utils.js           # Only looks in src/lib directory"
-        echo "# config/settings.json       # Only looks in config directory"
-        echo "#"
-        echo "# Examples with filenames (searched recursively):"
-        echo "# README.md                  # Finds all README.md files"
-        echo "# .env                      # Finds all .env files"
-        echo "# config.json              # Finds all config.json files"
-        echo "#"
-        echo "# Lines starting with # are ignored"
+        echo "# List files to copy, one per line:"
+        echo "# - Specific path: src/file.js"
+        echo "# - Any file: filename.txt"
         echo
-    } >> "$artifacts_file"
-    echo
+    } >"$config"
     usage
 fi
 
 # Check if source directory exists
 if [ ! -d "$source_dir" ]; then
-    echo "Error: Source directory '$source_dir' not found"
+    print_error "Source directory '$source_dir' not found"
     exit 1
 fi
 
 output_dir="artifacts"
 mkdir -p "$output_dir"
 copied_count=0
-conflict_count=0
+
+# Initialize metadata file
+init_metadata
 
 while IFS= read -r file || [ -n "$file" ]; do
-    # Skip empty lines and comments
+    # Skip comments and empty lines
     [[ -z "$file" || "$file" =~ ^[[:space:]]*# ]] && continue
-
-    # Remove any leading/trailing whitespace
     file=$(echo "$file" | xargs)
 
-    # If the file contains a path separator, treat it as a specific path
     if [[ "$file" == *"/"* ]]; then
+        # Copy specific file
         full_path="$source_dir/$file"
-        if [ -f "$full_path" ]; then
-            filename=$(basename "$full_path")
-            # Handle filename conflicts
-            if [ -f "$output_dir/$filename" ]; then
-                new_filename="${filename%.*}_$((++conflict_count)).${filename##*.}"
-                echo "Warning: File conflict, renaming to $new_filename"
-                filename="$new_filename"
-            fi
-            cp "$full_path" "$output_dir/$filename"
-            echo "$full_path -> $output_dir/$filename"
-            ((copied_count++))
-        else
-            echo "Warning: Specific file not found: $file"
-        fi
-    else
-        # Find the file recursively in the source directory
-        while IFS= read -r found_file; do
-            # Skip if find returned nothing
-            [ -z "$found_file" ] && continue
+        [ ! -f "$full_path" ] && print_warning "Not found: $file" && continue
 
+        filename=$(basename "$full_path")
+        cp "$full_path" "$output_dir/$filename"
+        add_to_metadata "$filename" "$full_path" "$(get_file_size "$full_path")" "$(get_file_type "$full_path")"
+        print_info "Copied: $full_path"
+        ((copied_count++))
+    else
+        # Copy found files
+        while IFS= read -r found_file; do
+            [ -z "$found_file" ] && continue
             filename=$(basename "$found_file")
-            # Handle filename conflicts
-            if [ -f "$output_dir/$filename" ]; then
-                new_filename="${filename%.*}_$((++conflict_count)).${filename##*.}"
-                echo "Warning: File conflict, renaming to $new_filename"
-                filename="$new_filename"
-            fi
             cp "$found_file" "$output_dir/$filename"
-            echo "$found_file -> $output_dir/$filename"
+            add_to_metadata "$filename" "$found_file" "$(get_file_size "$found_file")" "$(get_file_type "$found_file")"
+            print_info "Copied: $found_file"
             ((copied_count++))
         done < <(find "$source_dir" -type f -name "$file" -not -path "./artifacts/*" 2>/dev/null)
     fi
-done < "$artifacts_file"
+done <"$config"
 
+# Summary
 echo
-echo "Summary:"
-echo "- Created $copied_count artifacts in $output_dir/"
-if [ $conflict_count -gt 0 ]; then
-    echo "- Renamed $conflict_count files due to naming conflicts"
-fi
+print_info "- Created $copied_count artifacts in $output_dir/"
+print_info "- Generated metadata in $output_dir/metadata.json"
