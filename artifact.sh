@@ -10,28 +10,51 @@ print_info() { echo -e "${GREEN}$1${NC}"; }
 print_warning() { echo -e "${YELLOW}$1${NC}"; }
 print_error() { echo -e "${RED}$1${NC}"; }
 
-# Usage message - replace the current usage() function
+# Usage
 usage() {
-    echo -e "${YELLOW}"
-    echo "Usage: $0 [src] [config]"
-    echo "  src               Source directory (default: current directory)"
-    echo "  config            Artifact config  (default: .artifacts)"
+    echo "Usage: $0 [options] [src] [config]"
+    echo
+    echo "Options:"
+    echo "  -h, --help             Show this help message"
+    echo "  -v, --verbose          Enable verbose output"
+    echo "  -c, --clear            Clear existing artifacts"
+    echo "  -d, --dry-run          Show what would be copied without copying"
+    echo "  -f, --force            Overwrite existing artifacts directory"
+    echo "  -o, --output DIR       Specify output directory (default: artifacts)"
+    echo
+    echo "Arguments:"
+    echo "  src                    Source directory (default: current directory)"
+    echo "  config                 Artifact config  (default: .artifacts)"
     echo
     echo "Commands:"
-    echo "  $0 clear      Remove artifacts directory"
-    echo -e "${NC}"
+    echo "  $0 clear               Remove artifacts directory"
     exit 1
 }
 
 # Replace clear_artifacts() with simpler version
 clear_artifacts() {
-    if [ ! -d "artifacts" ]; then
-        print_error "No artifacts directory found."
+    local dir="${1:-artifacts}"
+
+    if [ ! -d "$dir" ]; then
+        print_error "Directory '$dir' not found."
         exit 0
     fi
-    rm -rf "artifacts"
-    print_info "Artifacts directory removed."
-    exit 0
+
+    # Count files before removal
+    local file_count=$(find "$dir" -type f -not -name "metadata.json" | wc -l)
+
+    if [ "$file_count" -eq 0 ]; then
+        print_warning "No artifacts found in '$dir'."
+        exit 0
+    fi
+
+    # Remove all files except .gitkeep
+    find "$dir" -type f -not -name ".gitkeep" -exec rm -f {} +
+
+    # Remove empty directories except the root output directory
+    find "$dir" -mindepth 1 -type d -empty -delete
+
+    print_info "Removed $file_count artifact from '$dir'."
 }
 
 # Initialize metadata JSON
@@ -68,7 +91,6 @@ get_file_type() {
 }
 
 # Add entry to metadata JSON
-# Parameters: configname original_path file_size file_type
 add_to_metadata() {
     local filename="$1"
     local path="$2"
@@ -89,17 +111,60 @@ add_to_metadata() {
     mv "$output_dir/metadata_temp.json" "$output_dir/metadata.json"
 }
 
-# Parse arguments
-source_dir="."
-config=".artifacts"
-
-# Handle special commands first
-if [ "$1" = "help" ]; then
-    usage
-elif [ "$1" = "clear" ]; then
-    clear_artifacts
+# Parse command line arguments using getopt
+TEMP=$(getopt -o hvdcfo: --long help,verbose,dry-run,clear,force,output: -n "$0" -- "$@")
+if [ $? != 0 ]; then
+    echo "Failed to parse arguments. Use --help for usage information."
+    exit 1
 fi
 
+eval set -- "$TEMP"
+
+# Default values
+source_dir="."
+config=".artifacts"
+output_dir="artifacts"
+verbose=false
+dry_run=false
+force=true
+
+# Process options
+while true; do
+    case "$1" in
+    -h | --help)
+        usage
+        ;;
+    -v | --verbose)
+        verbose=true
+        shift
+        ;;
+    -d | --dry-run)
+        dry_run=true
+        shift
+        ;;
+    -c | --clear)
+        clear_artifacts "$output_dir"
+        ;;
+    -f | --force)
+        force=true
+        shift
+        ;;
+    -o | --output)
+        output_dir="$2"
+        shift 2
+        ;;
+    --)
+        shift
+        break
+        ;;
+    *)
+        print_error "Internal error!"
+        exit 1
+        ;;
+    esac
+done
+
+# Handle remaining arguments
 case $# in
 0) ;;
 1) source_dir="$1" ;;
@@ -109,6 +174,12 @@ case $# in
     ;;
 *) usage ;;
 esac
+
+# Handle special commands
+if [ "$1" = "clear" ]; then
+    clear_artifacts
+    exit 0
+fi
 
 # Check if jq is installed
 if ! command -v jq &>/dev/null; then
@@ -136,12 +207,19 @@ if [ ! -d "$source_dir" ]; then
     exit 1
 fi
 
-output_dir="artifacts"
-mkdir -p "$output_dir"
-copied_count=0
+# Check if output directory exists and handle force flag
+if [ -d "$output_dir" ] && [ "$force" = false ]; then
+    print_error "Output directory '$output_dir' already exists. Use --force to overwrite."
+    exit 1
+fi
 
-# Initialize metadata file
-init_metadata
+# Create output directory if not in dry-run mode
+if [ "$dry_run" = false ]; then
+    mkdir -p "$output_dir"
+    init_metadata
+fi
+
+copied_count=0
 
 while IFS= read -r file || [ -n "$file" ]; do
     # Skip comments and empty lines
@@ -154,24 +232,44 @@ while IFS= read -r file || [ -n "$file" ]; do
         [ ! -f "$full_path" ] && print_warning "Not found: $file" && continue
 
         filename=$(basename "$full_path")
-        cp "$full_path" "$output_dir/$filename"
-        add_to_metadata "$filename" "$full_path" "$(get_file_size "$full_path")" "$(get_file_type "$full_path")"
-        print_info "Copied: $full_path"
+
+        if [ "$dry_run" = true ]; then
+            print_info "[DRY RUN] $full_path -> $output_dir/$filename"
+        else
+            cp "$full_path" "$output_dir/$filename"
+            add_to_metadata "$filename" "$full_path" "$(get_file_size "$full_path")" "$(get_file_type "$full_path")"
+            if [[ "$verbose" = true ]]; then
+                print_info "$full_path -> $output_dir/$filename"
+            fi
+        fi
         ((copied_count++))
     else
         # Copy found files
         while IFS= read -r found_file; do
             [ -z "$found_file" ] && continue
             filename=$(basename "$found_file")
-            cp "$found_file" "$output_dir/$filename"
-            add_to_metadata "$filename" "$found_file" "$(get_file_size "$found_file")" "$(get_file_type "$found_file")"
-            print_info "Copied: $found_file"
+            if [ "$dry_run" = true ]; then
+                print_info "[DRY RUN] $found_file -> $output_dir/$filename"
+            else
+                cp "$found_file" "$output_dir/$filename"
+                add_to_metadata "$filename" "$found_file" "$(get_file_size "$found_file")" "$(get_file_type "$found_file")"
+                if [[ "$verbose" = true ]]; then
+                    print_info "$found_file -> $output_dir/$filename"
+                fi
+            fi
             ((copied_count++))
         done < <(find "$source_dir" -type f -name "$file" -not -path "./artifacts/*" 2>/dev/null)
     fi
 done <"$config"
 
 # Summary
-echo
-print_info "- Created $copied_count artifacts in $output_dir/"
-print_info "- Generated metadata in $output_dir/metadata.json"
+if [ "$dry_run" = true ]; then
+    print_info "- Would create $copied_count artifacts in $output_dir/"
+    print_info "- Would generate metadata in $output_dir/metadata.json"
+else
+    if [[ "$verbose" = true ]]; then
+        echo
+    fi
+    print_info "- Created $copied_count artifacts in $output_dir/"
+    print_info "- Generated metadata in $output_dir/metadata.json"
+fi
