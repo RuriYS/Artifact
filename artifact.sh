@@ -31,13 +31,12 @@ usage() {
     exit 1
 }
 
-# Replace clear_artifacts() with simpler version
 clear_artifacts() {
     local dir="${1:-artifacts}"
 
     if [ ! -d "$dir" ]; then
-        print_error "Directory '$dir' not found."
-        exit 0
+        print_warning "Directory '$dir' not found."
+        return 0
     fi
 
     # Count files before removal
@@ -45,7 +44,7 @@ clear_artifacts() {
 
     if [ "$file_count" -eq 0 ]; then
         print_warning "No artifacts found in '$dir'."
-        exit 0
+        return 0
     fi
 
     # Remove all files except .gitkeep
@@ -54,7 +53,8 @@ clear_artifacts() {
     # Remove empty directories except the root output directory
     find "$dir" -mindepth 1 -type d -empty -delete
 
-    print_info "Removed $file_count artifact from '$dir'."
+    print_info "Removed $file_count artifacts from '$dir'."
+    return 0
 }
 
 # Initialize metadata JSON
@@ -127,6 +127,7 @@ output_dir="artifacts"
 verbose=false
 dry_run=false
 force=true
+clear=true
 
 # Process options
 while true; do
@@ -143,7 +144,8 @@ while true; do
         shift
         ;;
     -c | --clear)
-        clear_artifacts "$output_dir"
+        clear=true
+        shift
         ;;
     -f | --force)
         force=true
@@ -211,6 +213,11 @@ fi
 if [ -d "$output_dir" ] && [ "$force" = false ]; then
     print_error "Output directory '$output_dir' already exists. Use --force to overwrite."
     exit 1
+fi
+
+# Clear artifacts
+if [ "$clear" = true ]; then
+    clear_artifacts "$output_dir"
 fi
 
 # Create output directory if not in dry-run mode
