@@ -26,6 +26,12 @@ usage() {
     echo "  src                    Source directory (default: current directory)"
     echo "  config                 Artifact config  (default: .artifacts)"
     echo
+    echo "Config Format: (gitignore syntax)"
+    echo "  - app/*.php            Match all PHP files in app directory"
+    echo "  - resources/**/*.tsx   Match all TSX files recursively in resources"
+    echo "  - *.json              Match all JSON files in root"
+    echo "  - !vendor             Exclude vendor directory"
+    echo
     echo "Commands:"
     echo "  $0 clear               Remove artifacts directory"
     exit 1
@@ -39,7 +45,6 @@ clear_artifacts() {
         return 0
     fi
 
-    # Count files before removal
     local file_count=$(find "$dir" -type f -not -name "metadata.json" | wc -l)
 
     if [ "$file_count" -eq 0 ]; then
@@ -47,10 +52,7 @@ clear_artifacts() {
         return 0
     fi
 
-    # Remove all files except .gitkeep
     find "$dir" -type f -not -name ".gitkeep" -exec rm -f {} +
-
-    # Remove empty directories except the root output directory
     find "$dir" -mindepth 1 -type d -empty -delete
 
     print_info "Removed $file_count artifacts from '$dir'."
@@ -66,7 +68,6 @@ init_metadata() {
 }' >"$output_dir/metadata.json"
 }
 
-# Get file size in bytes
 get_file_size() {
     local file="$1"
     if [ -f "$file" ]; then
@@ -86,6 +87,8 @@ get_file_type() {
     json) echo "application/json" ;;
     md) echo "text/markdown" ;;
     txt) echo "text/plain" ;;
+    php) echo "text/x-php" ;;
+    tsx | jsx) echo "text/typescript-jsx" ;;
     *) file --mime-type -b "$file" 2>/dev/null || echo "application/octet-stream" ;;
     esac
 }
@@ -109,6 +112,20 @@ add_to_metadata() {
        }]' "$output_dir/metadata.json" >"$output_dir/metadata_temp.json"
 
     mv "$output_dir/metadata_temp.json" "$output_dir/metadata.json"
+}
+
+# Convert glob pattern to find pattern
+convert_pattern() {
+    local pattern="$1"
+    # Remove leading ./ if present
+    pattern="${pattern#./}"
+    # Handle ** recursive matching
+    pattern="${pattern//\*\*/*}"
+    # Handle remaining * matching
+    pattern="${pattern//\*/[^/]*}"
+    # Handle ? matching
+    pattern="${pattern//\?/.}"
+    echo "$pattern"
 }
 
 # Parse command line arguments using getopt
@@ -195,9 +212,11 @@ fi
 if [ ! -f "$config" ]; then
     print_info "$config does not exist, creating it..."
     {
-        echo "# List files to copy, one per line:"
-        echo "# - Specific path: src/file.js"
-        echo "# - Any file: filename.txt"
+        echo "# Syntax (.gitignore syntax):"
+        echo "# - app/*.php            Match all PHP files in app directory"
+        echo "# - resources/**/*.tsx   Match all TSX files recursively in resources"
+        echo "# - *.json              Match all JSON files in root"
+        echo "# - !vendor             Exclude vendor directory"
         echo
     } >"$config"
     usage
@@ -227,47 +246,57 @@ if [ "$dry_run" = false ]; then
 fi
 
 copied_count=0
+declare -a exclude_patterns=()
+declare -a include_patterns=()
 
-while IFS= read -r file || [ -n "$file" ]; do
+# First pass: collect patterns
+while IFS= read -r pattern || [ -n "$pattern" ]; do
     # Skip comments and empty lines
-    [[ -z "$file" || "$file" =~ ^[[:space:]]*# ]] && continue
-    file=$(echo "$file" | xargs)
+    [[ -z "$pattern" || "$pattern" =~ ^[[:space:]]*# ]] && continue
+    pattern=$(echo "$pattern" | xargs)
 
-    if [[ "$file" == *"/"* ]]; then
-        # Copy specific file
-        full_path="$source_dir/$file"
-        [ ! -f "$full_path" ] && print_warning "Not found: $file" && continue
-
-        filename=$(basename "$full_path")
-
-        if [ "$dry_run" = true ]; then
-            print_info "[DRY RUN] $full_path -> $output_dir/$filename"
-        else
-            cp "$full_path" "$output_dir/$filename"
-            add_to_metadata "$filename" "$full_path" "$(get_file_size "$full_path")" "$(get_file_type "$full_path")"
-            if [[ "$verbose" = true ]]; then
-                print_info "$full_path -> $output_dir/$filename"
-            fi
-        fi
-        ((copied_count++))
+    if [[ "$pattern" == "!"* ]]; then
+        # Handle exclude pattern
+        exclude_patterns+=("${pattern#!}")
     else
-        # Copy found files
-        while IFS= read -r found_file; do
-            [ -z "$found_file" ] && continue
-            filename=$(basename "$found_file")
-            if [ "$dry_run" = true ]; then
-                print_info "[DRY RUN] $found_file -> $output_dir/$filename"
-            else
-                cp "$found_file" "$output_dir/$filename"
-                add_to_metadata "$filename" "$found_file" "$(get_file_size "$found_file")" "$(get_file_type "$found_file")"
-                if [[ "$verbose" = true ]]; then
-                    print_info "$found_file -> $output_dir/$filename"
-                fi
-            fi
-            ((copied_count++))
-        done < <(find "$source_dir" -type f -name "$file" -not -path "./artifacts/*" 2>/dev/null)
+        # Handle include pattern
+        include_patterns+=("$pattern")
     fi
 done <"$config"
+
+# Process files based on patterns
+process_files() {
+    local file="$1"
+    local base_name=$(basename "$file")
+
+    # Check exclude patterns first
+    for exclude in "${exclude_patterns[@]}"; do
+        if [[ "$file" =~ $(convert_pattern "$exclude") ]]; then
+            return
+        fi
+    done
+
+    # Process file if it matches any include pattern
+    if [ "$dry_run" = true ]; then
+        print_info "[DRY RUN] $file -> $output_dir/$base_name"
+    else
+        cp "$file" "$output_dir/$base_name"
+        add_to_metadata "$base_name" "$file" "$(get_file_size "$file")" "$(get_file_type "$file")"
+        if [[ "$verbose" = true ]]; then
+            print_info "$file -> $output_dir/$base_name"
+        fi
+    fi
+    ((copied_count++))
+}
+
+# Second pass: process files
+for pattern in "${include_patterns[@]}"; do
+    find_pattern=$(convert_pattern "$pattern")
+    while IFS= read -r file; do
+        [ -z "$file" ] && continue
+        process_files "$file"
+    done < <(find "$source_dir" -type f -path "./$find_pattern" -not -path "./artifacts/*" 2>/dev/null)
+done
 
 # Summary
 if [ "$dry_run" = true ]; then
